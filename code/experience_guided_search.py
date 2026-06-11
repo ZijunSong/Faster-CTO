@@ -15,48 +15,19 @@ try:
 except ImportError:
     raise ImportError("Please install vLLM: pip install vllm")
 
+from task_prompts import (
+    add_task_args,
+    get_baseline_system_prompt,
+    get_experience_guided_system_prompt,
+    resolve_task_type,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-
-# ==========================================
-# Prompt Templates
-# ==========================================
-
-EXPERIENCE_GUIDED_SYSTEM_PROMPT = """You are an advanced mathematical solver augmented with **Experience Bank **. 
-You are currently in a **Test-Time Scaling** loop. Previous attempts on this specific problem have been analyzed to extract useful "Propositions" (Intermediate Results) and "Critical Pitfalls" (Past Errors).
- 
-Your goal is to solve the problem by starting from the definitions of the problem. Use previous memories strictly as a **navigational aid**. 
- 
- 
-**Operational Guidelines:**
- 
-1.  **Accelerate via Verified Propositions (The Anchor):**
-    - **Rule:** Treat Propositions as *structural hypotheses*, not proven facts.
-    - **Priority:** Prioritize propositions that offer **abstract insights**, **simplifications**, or **identities** (e.g., algebraic simplifications, geometric invariants, combinatorial symmetries).
-    - **Skepticism:** Be extremely skeptical of **raw numerical propositions** or unverified final answers. NEVER use a specific number from the report unless you have independently derived the logic that produces it.
-    - **Action:** If a proposition offers a shortcut, verify its *premise* instantly. If the premise holds and aligns with your logic, use it to accelerate. If it contradicts your intuition or derivation, **discard it immediately**.
- 
-2.  **Navigate via Critical Pitfalls:**
-    - The provided "Critical Pitfalls" describe specific logical errors or dead-ends encountered in previous failures.
-    - **You are STRICTLY FORBIDDEN** from repeating the Critical Pitfalls.
-    - If you approach a decision point mentioned in a pitfall, you MUST actively choose an alternative strategy/path.
-    
-3.  **Conflict Resolution & Robustness:**
-    - **Scenario:** You encounter a contradiction (e.g., deriving two conflicting values for the same variable from different constraints).
-    - **Constraint:** Do NOT simply choose the "easier" or "more common" value.
-    - **Action:** A contradiction usually means a **foundational assumption** (e.g., geometric configuration, variable definition) is incorrect. **Backtrack to the very beginning**, re-read the problem statement, and challenge your initial setup.
- 
- 
-**Context from Previous Attempts:**
-{experience_context}
- 
-**Instruction:**
-Reason step by step. Consult the Experience Bank critically: Avoiding the previous error with pitfalls, and use propositions only if they accelerate your work. Put your final answer within \\boxed{{}}.
-"""
 
 # ==========================================
 # Data Loading & Parsing
@@ -127,10 +98,13 @@ def load_and_aggregate_raw_experiences(
                 if isinstance(p, str):
                     aggregated_propositions.add(p)
 
-    return {
+    result = {
         "critical_pitfalls": sorted(list(aggregated_pitfalls)),
         "verified_propositions": sorted(list(aggregated_propositions))
     }
+    if not result["critical_pitfalls"] and not result["verified_propositions"]:
+        return None
+    return result
 
 def construct_experience_context(experience_data: Dict[str, Any]) -> str:
     """
@@ -211,7 +185,8 @@ def save_result(
     for k, v in question_data.items():
         if k not in result:
             result[k] = v
-            
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
@@ -239,11 +214,31 @@ def main():
     parser.add_argument('--top-p', type=float, default=0.95)
     parser.add_argument('--top-k', type=int, default=20)
     parser.add_argument('--max-tokens', type=int, default=2048)
-    
+    parser.add_argument(
+        '--system-prompt',
+        type=str,
+        default=None,
+        help='Fallback system prompt when no experience is available for a question.',
+    )
+    add_task_args(parser)
+
     parser.add_argument('--start-idx', type=int, default=0)
     parser.add_argument('--end-idx', type=int, default=None)
+    parser.add_argument(
+        '--disable-custom-all-reduce',
+        action='store_true',
+        help='vLLM: use NCCL for TP all-reduce (avoids custom all-reduce failures on some multi-GPU setups).',
+    )
 
     args = parser.parse_args()
+    task_type = resolve_task_type(
+        dataset=args.dataset,
+        task_type=args.task_type,
+        input_path=args.input,
+    )
+    experience_guided_template = get_experience_guided_system_prompt(task_type)
+    fallback_system_prompt = get_baseline_system_prompt(task_type, args.system_prompt)
+    logger.info("Task type: %s (dataset=%s)", task_type, args.dataset)
 
     # Setup directories
     output_path = Path(args.output)
@@ -284,13 +279,16 @@ def main():
 
     # Initialize vLLM
     logger.info(f"Initializing vLLM: {args.model}")
-    llm = LLM(
+    llm_kwargs = dict(
         model=args.model,
         tensor_parallel_size=args.tensor_parallel_size,
         trust_remote_code=True,
         gpu_memory_utilization=0.85,
-        enforce_eager=False
+        enforce_eager=False,
     )
+    if args.disable_custom_all_reduce:
+        llm_kwargs["disable_custom_all_reduce"] = True
+    llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     
     sampling_params = SamplingParams(
@@ -325,13 +323,14 @@ def main():
             # 2. Construct experience Context String
             if experience_data:
                 experience_context_str = construct_experience_context(experience_data)
-                system_content = EXPERIENCE_GUIDED_SYSTEM_PROMPT.format(
+                system_content = experience_guided_template.format(
                     experience_context=experience_context_str
                 )
             else:
-                # Fallback if no experience found
-                raise ValueError
-                # system_content = "Please reason step by step, and put your final answer within \\boxed{}."
+                logger.warning(
+                    f"No experience for question {original_idx}; using fallback system prompt."
+                )
+                system_content = fallback_system_prompt
             
             # 3. Build Full Prompt
             messages = [

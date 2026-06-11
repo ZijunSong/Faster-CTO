@@ -14,10 +14,10 @@ try:
 except ImportError:
     raise ImportError("Please install vLLM: pip install vllm")
 
+from task_prompts import add_task_args, get_baseline_system_prompt, resolve_task_type
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-DEFAULT_MATH_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 def load_jsonl(file_path: str) -> List[Dict[str, Any]]:
     data = []
@@ -28,8 +28,6 @@ def load_jsonl(file_path: str) -> List[Dict[str, Any]]:
     return data
 
 def format_prompt(question: str, system_prompt: str = None) -> str:
-    if system_prompt is None:
-        system_prompt = DEFAULT_MATH_PROMPT
     return f"{system_prompt}\n\n{question}"
 
 def extract_thinking(text: str) -> Tuple[str, str]:
@@ -159,9 +157,12 @@ def batch_inference(
     top_k: int = 20,
     max_tokens: int = 2048,
     system_prompt: str = None,
+    task_type: str = "math",
     start_idx: int = 0,
     end_idx: int = None,
+    disable_custom_all_reduce: bool = False,
 ):
+    system_prompt = get_baseline_system_prompt(task_type, system_prompt)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
@@ -185,13 +186,16 @@ def batch_inference(
     questions_map = {idx: item for idx, item in pending_questions}
     
     print(f"Initializing vLLM engine (TP={tensor_parallel_size})...")
-    llm = LLM(
+    llm_kwargs = dict(
         model=model_name,
         tensor_parallel_size=tensor_parallel_size,
         trust_remote_code=True,
         gpu_memory_utilization=0.85,
         enforce_eager=False,
     )
+    if disable_custom_all_reduce:
+        llm_kwargs["disable_custom_all_reduce"] = True
+    llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     
     sampling_params = SamplingParams(
@@ -218,7 +222,7 @@ def batch_inference(
         for original_idx, item in current_chunk:
             question = item.get('question', '')
             messages = [
-                {"role": "system", "content": DEFAULT_MATH_PROMPT if system_prompt is None else system_prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ]
             
@@ -274,11 +278,23 @@ def main():
     parser.add_argument('--top-k', '-k', type=int, default=20)
     parser.add_argument('--max-tokens', type=int, default=2048)
     parser.add_argument('--system-prompt', type=str, default=None)
+    add_task_args(parser)
     parser.add_argument('--start-idx', type=int, default=0)
     parser.add_argument('--end-idx', type=int, default=None)
+    parser.add_argument(
+        '--disable-custom-all-reduce',
+        action='store_true',
+        help='vLLM: use NCCL for TP all-reduce (avoids custom all-reduce failures on some multi-GPU setups).',
+    )
     
     args = parser.parse_args()
-    
+    task_type = resolve_task_type(
+        dataset=args.dataset,
+        task_type=args.task_type,
+        input_path=args.input,
+    )
+    logger.info("Task type: %s (dataset=%s)", task_type, args.dataset)
+
     batch_inference(
         model_name=args.model,
         input_file=args.input,
@@ -291,8 +307,10 @@ def main():
         top_k=args.top_k,
         max_tokens=args.max_tokens,
         system_prompt=args.system_prompt,
+        task_type=task_type,
         start_idx=args.start_idx,
         end_idx=args.end_idx,
+        disable_custom_all_reduce=args.disable_custom_all_reduce,
     )
 
 if __name__ == '__main__':
