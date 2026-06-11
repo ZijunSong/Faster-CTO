@@ -4,7 +4,7 @@ import json
 import argparse
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from tqdm import tqdm
 import logging
 from collections import defaultdict
@@ -161,6 +161,7 @@ def batch_inference(
     start_idx: int = 0,
     end_idx: int = None,
     disable_custom_all_reduce: bool = False,
+    max_model_len: Optional[int] = None,
 ):
     system_prompt = get_baseline_system_prompt(task_type, system_prompt)
     output_path = Path(output_dir)
@@ -195,6 +196,8 @@ def batch_inference(
     )
     if disable_custom_all_reduce:
         llm_kwargs["disable_custom_all_reduce"] = True
+    if max_model_len is not None:
+        llm_kwargs["max_model_len"] = max_model_len
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     
@@ -286,6 +289,7 @@ def main():
         action='store_true',
         help='vLLM: use NCCL for TP all-reduce (avoids custom all-reduce failures on some multi-GPU setups).',
     )
+    parser.add_argument('--max-model-len', type=int, default=None, help='vLLM max_model_len (optional)')
     
     args = parser.parse_args()
     task_type = resolve_task_type(
@@ -311,6 +315,7 @@ def main():
         start_idx=args.start_idx,
         end_idx=args.end_idx,
         disable_custom_all_reduce=args.disable_custom_all_reduce,
+        max_model_len=args.max_model_len,
     )
 
 if __name__ == '__main__':

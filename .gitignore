@@ -18,3 +18,6 @@ results_*/
 .vscode/
 *.swp
 .DS_Store
+
+logs/
+runs/

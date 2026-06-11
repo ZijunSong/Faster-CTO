@@ -229,6 +229,7 @@ def main():
         action='store_true',
         help='vLLM: use NCCL for TP all-reduce (avoids custom all-reduce failures on some multi-GPU setups).',
     )
+    parser.add_argument('--max-model-len', type=int, default=None, help='vLLM max_model_len (optional)')
 
     args = parser.parse_args()
     task_type = resolve_task_type(
@@ -288,6 +289,8 @@ def main():
     )
     if args.disable_custom_all_reduce:
         llm_kwargs["disable_custom_all_reduce"] = True
+    if args.max_model_len is not None:
+        llm_kwargs["max_model_len"] = args.max_model_len
     llm = LLM(**llm_kwargs)
     tokenizer = llm.get_tokenizer()
     
