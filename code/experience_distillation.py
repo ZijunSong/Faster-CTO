@@ -20,6 +20,10 @@ from evaluation.grader import math_equal
 from sal.utils.math import extract_answer
 from task_prompts import add_task_args, get_distillation_prompt, resolve_task_type
 
+# 默认 int_max_str_digits=4300；模型输出含超大整数的畸形 JSON 会在 json.loads 时抛 ValueError
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)  # 0 = 取消限制（允许的最大值）
+
 _TASK_TYPE = "math"
 
 # 兼容 vLLM 0.8.x 与新版 transformers：新版 transformers 移除了 all_special_tokens_extended，
@@ -376,7 +380,7 @@ def extract_and_validate_json(text: str) -> Optional[str]:
     try:
         json.loads(candidate)
         return candidate
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         return None
 
 def main():
