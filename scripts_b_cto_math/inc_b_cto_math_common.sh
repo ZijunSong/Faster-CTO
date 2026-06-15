@@ -62,9 +62,21 @@ case "${MODEL_TAG}" in
   Qwen3_4B_Thinking)
     export MODEL_NAME="${MODEL_NAME:-${MODELS_ROOT}/Qwen3-4B-Thinking-2507}"
     export MAX_TOKENS="${MAX_TOKENS:-38912}"
+    export B_CTO_DEVICE="${B_CTO_DEVICE:-cuda:0}"
+    export B_CTO_DEVICE_MAP="${B_CTO_DEVICE_MAP:-}"
+    export B_CTO_DTYPE="${B_CTO_DTYPE:-bfloat16}"
+    ;;
+  Qwen3_30B_Thinking|Qwen3_30B_A3B_Thinking)
+    export MODEL_NAME="${MODEL_NAME:-${MODELS_ROOT}/Qwen3-30B-A3B-Thinking-2507}"
+    export MAX_TOKENS="${MAX_TOKENS:-38912}"
+    export DISTILL_MAX_TOKENS="${DISTILL_MAX_TOKENS:-8192}"
+    export DISTILL_GPU_MEMORY_UTILIZATION="${DISTILL_GPU_MEMORY_UTILIZATION:-0.95}"
+    export B_CTO_DEVICE="${B_CTO_DEVICE:-cuda:0}"
+    export B_CTO_DEVICE_MAP="${B_CTO_DEVICE_MAP:-auto}"
+    export B_CTO_DTYPE="${B_CTO_DTYPE:-bfloat16}"
     ;;
   *)
-    echo "ERROR: B-CTO scripts currently support MODEL_TAG=Qwen3_4B_Thinking only (got ${MODEL_TAG})"
+    echo "ERROR: 未知 MODEL_TAG=${MODEL_TAG}（支持 Qwen3_4B_Thinking / Qwen3_30B_Thinking）"
     exit 1
     ;;
 esac

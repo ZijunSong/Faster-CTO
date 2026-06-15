@@ -1,11 +1,12 @@
 #!/bin/bash
-# B-CTO 完整流水线（step1→7），重复 NUM_RUNS 次；step3/5/7 使用 token-level B-CTO (HF)
+# CTO-Rescore 完整流水线（step1→7），step3/5/7 使用 vLLM sparse negative reranking
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=inc_b_cto_math_common.sh
-source "$SCRIPT_DIR/inc_b_cto_math_common.sh"
+export EFFICIENT_CTO_METHOD=cto_rescore
+# shellcheck source=inc_efficient_cto_common.sh
+source "$SCRIPT_DIR/inc_efficient_cto_common.sh"
 
 _SYSTEM_PROMPT_ARGS=()
 if [ -n "${SYSTEM_PROMPT:-}" ]; then
@@ -19,27 +20,37 @@ fi
 
 _TASK_ARGS=(--dataset "$DATASET")
 
-_BCTO_DEVICE_ARGS=(--device "${B_CTO_DEVICE:-cuda:0}" --dtype "${B_CTO_DTYPE:-bfloat16}")
-if [ -n "${B_CTO_DEVICE_MAP:-}" ]; then
-  _BCTO_DEVICE_ARGS+=(--device-map "$B_CTO_DEVICE_MAP")
-fi
+_count_question_jsons() {
+  find "$1" -maxdepth 1 -name '[0-9]*.json' 2>/dev/null | wc -l
+}
 
-_run_b_cto_search() {
+_expected_questions() {
+  local end="${END_INDEX:-30}"
+  local start="${START_INDEX:-0}"
+  echo $((end - start))
+}
+
+_run_cto_rescore_search() {
   local exp_dir="$1"
   local out_dir="$2"
   mkdir -p "$out_dir"
-  python code/b_cto_guided_search.py \
+  python code/cto_rescore_guided_search.py \
     --model "$MODEL_NAME" \
     --input "$QUESTION_FILE" \
     --experience-dir "$exp_dir" \
     --output "$out_dir" \
     --n-experience-completions "$N_EXP_COMPLETIONS" \
     --n-completions "$N_COMPLETIONS" \
+    --n-generate "$CTO_RESCORE_N_GENERATE" \
+    --rescore-m "$CTO_RESCORE_M" \
+    --rescore-selection "$CTO_RESCORE_SELECTION" \
+    --rescore-risk-threshold "$CTO_RESCORE_RISK_THRESHOLD" \
     --alpha "$ALPHA" \
-    --plausibility-top-k "$PLAUSIBILITY_TOP_K" \
-    --b-cto-trigger "$B_CTO_TRIGGER" \
-    "${_BCTO_THRESHOLD_ARGS[@]}" \
-    "${_BCTO_DEVICE_ARGS[@]}" \
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+    --gpu-memory-utilization "$CTO_GPU_MEMORY_UTILIZATION" \
+    --max-model-len "$CTO_MAX_MODEL_LEN" \
+    --vllm-score-batch-size "$VLLM_SCORE_BATCH_SIZE" \
+    --vllm-max-score-prompt-tokens "$VLLM_MAX_SCORE_PROMPT_TOKENS" \
     --temperature "$TEMPERATURE" \
     --top-p "$TOP_P" \
     --top-k "$TOP_K" \
@@ -47,7 +58,8 @@ _run_b_cto_search() {
     --start-idx "$START_INDEX" \
     --end-idx "$END_INDEX" \
     "${_TASK_ARGS[@]}" \
-    "${CTO_RETRIEVAL_ARGS[@]}"
+    "${CTO_RETRIEVAL_ARGS[@]}" \
+    "${_VLLM_TP_ARGS[@]}"
 }
 
 _run_distill() {
@@ -90,25 +102,31 @@ _run_one_pipeline() {
   local s7="${out_base}_step7/results"
 
   echo ""
-  echo "========== B-CTO(${B_CTO_TRIGGER}) Run ${run_id}/${NUM_RUNS} | ${DATASET} × ${MODEL_TAG} =========="
+  echo "========== CTO-Rescore Run ${run_id}/${NUM_RUNS} | ${DATASET} × ${MODEL_TAG} =========="
 
   mkdir -p "$s1"
-  python code/standard_sampling.py \
-    --model "$MODEL_NAME" \
-    --input "$QUESTION_FILE" \
-    --output "$s1" \
-    "${_TASK_ARGS[@]}" \
-    --n-completions "$N_COMPLETIONS" \
-    --batch-size "$BATCH_SIZE" \
-    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
-    --temperature "$TEMPERATURE" \
-    --top-p "$TOP_P" \
-    --top-k "$TOP_K" \
-    --max-tokens "$MAX_TOKENS" \
-    --start-idx "$START_INDEX" \
-    --end-idx "$END_INDEX" \
-    "${_SYSTEM_PROMPT_ARGS[@]}" \
-    "${_VLLM_TP_ARGS[@]}"
+  _exp_q="$(_expected_questions)"
+  _have_q="$(_count_question_jsons "$s1")"
+  if [ "$_have_q" -ge "$_exp_q" ]; then
+    echo "[skip] run${run_id} step1 (iter0): already have ${_have_q}/${_exp_q} questions"
+  else
+    python code/standard_sampling.py \
+      --model "$MODEL_NAME" \
+      --input "$QUESTION_FILE" \
+      --output "$s1" \
+      "${_TASK_ARGS[@]}" \
+      --n-completions "$N_COMPLETIONS" \
+      --batch-size "$BATCH_SIZE" \
+      --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+      --temperature "$TEMPERATURE" \
+      --top-p "$TOP_P" \
+      --top-k "$TOP_K" \
+      --max-tokens "$MAX_TOKENS" \
+      --start-idx "$START_INDEX" \
+      --end-idx "$END_INDEX" \
+      "${_SYSTEM_PROMPT_ARGS[@]}" \
+      "${_VLLM_TP_ARGS[@]}"
+  fi
 
   _run_distill "$s1" "$s2"
 
@@ -121,7 +139,7 @@ _run_one_pipeline() {
     --threshold "$THRESHOLD" \
     --keep-order
 
-  _run_b_cto_search "$s2d" "$s3"
+  _run_cto_rescore_search "$s2d" "$s3"
   _run_distill "$s3" "$s4"
 
   mkdir -p "$s4d" "${out_base}_step4/results_dedup_debug"
@@ -134,7 +152,7 @@ _run_one_pipeline() {
     --threshold "$THRESHOLD" \
     --keep-order
 
-  _run_b_cto_search "$s4d" "$s5"
+  _run_cto_rescore_search "$s4d" "$s5"
   _run_distill "$s5" "$s6"
 
   mkdir -p "$s6d" "${out_base}_step6/results_dedup_debug"
@@ -147,7 +165,7 @@ _run_one_pipeline() {
     --threshold "$THRESHOLD" \
     --keep-order
 
-  _run_b_cto_search "$s6d" "$s7"
+  _run_cto_rescore_search "$s6d" "$s7"
 }
 
 _eval_one_run() {
@@ -170,13 +188,13 @@ done
 SUMMARY_JSON="${RUNS_ROOT}/mean_std_summary.json"
 SUMMARY_MD="${RUNS_ROOT}/mean_std_summary.md"
 
-python scripts_b_cto_math/aggregate_b_cto_runs.py \
+python scripts_efficient_cto_math/aggregate_efficient_cto_runs.py \
   --runs-root "$RUNS_ROOT" \
   --num-runs "$NUM_RUNS" \
   --eval-iter "$EVAL_ITER" \
   --dataset "$DATASET" \
   --model-tag "$MODEL_TAG" \
-  --b-cto-trigger "$B_CTO_TRIGGER" \
+  --method "CTO-Rescore" \
   --output-json "$SUMMARY_JSON" \
   --output-md "$SUMMARY_MD"
 
@@ -184,10 +202,8 @@ python scripts_cto_qa/update_dataset_csv.py \
   --summary-json "$SUMMARY_JSON" \
   --csv-path "$RESULTS_CSV" \
   --model-name "$MODEL_NAME" \
-  --method "B-CTO-${B_CTO_TRIGGER}"
+  --method "CTO-Rescore"
 
 echo ""
-echo "========== B-CTO(${B_CTO_TRIGGER}) 全部 ${NUM_RUNS} 次运行完成 =========="
-echo "本 trigger 汇总: $SUMMARY_JSON"
-echo "数据集 CSV: $RESULTS_CSV"
+echo "========== CTO-Rescore 全部 ${NUM_RUNS} 次运行完成 =========="
 cat "$SUMMARY_MD"
