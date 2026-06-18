@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""汇总 CB-CTO / CTO-Rescore 多次运行的 Pass@1 与效率指标。"""
+"""汇总 CTO-Rescore 多次运行的 Pass@1 与效率指标。"""
 import argparse
 import json
 from pathlib import Path
@@ -25,12 +25,7 @@ def _collect_efficiency(runs_root: Path, num_runs: int, eval_iter: int) -> dict:
                     data = json.load(f)
             except Exception:
                 continue
-            comp = (
-                data.get("cb_cto_compute")
-                or data.get("cto_rescore_compute")
-                or data.get("cto_compute")
-                or {}
-            )
+            comp = data.get("cto_rescore_compute") or data.get("cto_compute") or {}
             if "processed_tokens_per_rollout_mean" in comp:
                 run_processed.append(float(comp["processed_tokens_per_rollout_mean"]))
             if "generated_tokens_mean" in comp:

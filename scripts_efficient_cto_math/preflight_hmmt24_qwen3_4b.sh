@@ -1,5 +1,5 @@
 #!/bin/bash
-# HMMT24 + Qwen3-4B-Thinking 实验前置检查（CB-CTO / CTO-Rescore 共用）
+# HMMT24 + Qwen3-4B-Thinking 实验前置检查（CTO-Rescore）
 set -euo pipefail
 
 _preflight_die() { echo "ERROR: $*" >&2; exit 1; }

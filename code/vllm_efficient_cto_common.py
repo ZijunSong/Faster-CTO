@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared vLLM utilities for CB-CTO and CTO-Rescore."""
+"""Shared vLLM utilities for CTO-Rescore."""
 
 from __future__ import annotations
 
@@ -14,22 +14,6 @@ import numpy as np
 import cto_guided_search as cto
 
 logger = logging.getLogger(__name__)
-
-TRIGGER_MODES = (
-    "entropy",
-    "margin",
-    "failure_pattern",
-    "rollout_disagreement",
-    "candidate_disagreement",
-)
-
-DEFAULT_THRESHOLDS = {
-    "entropy": 0.85,
-    "margin": 1.0,
-    "failure_pattern": 0.55,
-    "rollout_disagreement": 0.5,
-    "candidate_disagreement": 0.35,
-}
 
 
 def add_experience_args(parser: argparse.ArgumentParser) -> None:
@@ -209,14 +193,6 @@ def _normalized_entropy_from_step(step: Any, top_k: int = 5) -> float:
     return ent / math.log(vocab)
 
 
-def _margin_from_step(step: Any) -> float:
-    vals = _logprob_dict_values(step)
-    if len(vals) < 2:
-        return float("inf")
-    vals = sorted(vals, reverse=True)
-    return float(vals[0] - vals[1])
-
-
 def _max_pitfall_similarity(prefix_text: str, pitfall_texts: List[str], embed_model_path: str) -> float:
     if not pitfall_texts:
         return 0.0
@@ -235,72 +211,6 @@ def _max_pitfall_similarity(prefix_text: str, pitfall_texts: List[str], embed_mo
     pv = st.encode(pitfall_texts[:32], normalize_embeddings=True)
     sim = np.dot(pv, qv.T).flatten()
     return float(sim.max()) if sim.size else 0.0
-
-
-def _candidate_token_disagreement(candidates: Sequence[str], tokenizer: Any, n_tokens: int = 4) -> float:
-    if len(candidates) < 2:
-        return 0.0
-    prefixes: List[str] = []
-    for text in candidates:
-        try:
-            ids = tokenizer.encode(text, add_special_tokens=False)[:n_tokens]
-            prefixes.append(",".join(str(i) for i in ids))
-        except Exception:
-            prefixes.append(text[:32])
-    unique = len(set(prefixes))
-    return float(unique - 1) / float(max(len(candidates) - 1, 1))
-
-
-def chunk_is_high_risk(
-    trigger_mode: str,
-    *,
-    chunk_text: str,
-    prefix_text: str,
-    logprobs: Optional[Sequence[Any]],
-    all_candidate_texts: Sequence[str],
-    pitfall_texts: List[str],
-    embed_model_path: str,
-    threshold: float,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-    tokenizer: Any,
-) -> bool:
-    if trigger_mode == "entropy":
-        if not logprobs:
-            return False
-        ent = float(np.mean([_normalized_entropy_from_step(s) for s in logprobs if s]))
-        return ent > threshold
-    if trigger_mode == "margin":
-        if not logprobs:
-            return False
-        margins = [_margin_from_step(s) for s in logprobs if s]
-        if not margins:
-            return False
-        return float(np.mean(margins)) < threshold
-    if trigger_mode == "failure_pattern":
-        sim = _max_pitfall_similarity(prefix_text + chunk_text, pitfall_texts, embed_model_path)
-        return sim > threshold
-    if trigger_mode == "rollout_disagreement":
-        if not logprobs:
-            return _candidate_token_disagreement(all_candidate_texts, tokenizer) > threshold
-        greedy_ids = []
-        for step in logprobs:
-            vals = _logprob_dict_values(step)
-            if vals:
-                greedy_ids.append(int(np.argmax(vals)))
-        sampled_text = chunk_text
-        try:
-            sampled_ids = tokenizer.encode(sampled_text, add_special_tokens=False)[: len(greedy_ids)]
-        except Exception:
-            sampled_ids = []
-        if not greedy_ids or not sampled_ids:
-            return _candidate_token_disagreement(all_candidate_texts, tokenizer) > threshold
-        n = min(len(greedy_ids), len(sampled_ids))
-        return any(greedy_ids[i] != sampled_ids[i] for i in range(n))
-    if trigger_mode == "candidate_disagreement":
-        return _candidate_token_disagreement(all_candidate_texts, tokenizer) > threshold
-    raise ValueError(f"Unknown trigger mode: {trigger_mode}")
 
 
 def score_suffixes_batch(
