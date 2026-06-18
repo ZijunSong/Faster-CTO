@@ -174,7 +174,6 @@ python scripts_qa/aggregate_runs.py \
   --eval-iter "$EVAL_ITER" \
   --dataset "$DATASET" \
   --model-tag "$MODEL_TAG" \
-  --task-type "cto_math" \
   --output-json "$SUMMARY_JSON" \
   --output-md "$SUMMARY_MD"
 
